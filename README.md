@@ -96,7 +96,7 @@ Return the most recently published acts.
 Requires [Go 1.22+](https://go.dev/dl/).
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/arlis-mcp
+git clone https://github.com/hrantt/arlis-mcp
 cd arlis-mcp
 go build -o arlis-mcp .
 ```
