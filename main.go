@@ -111,22 +111,23 @@ func parseActCards(html, lang string) []ActCard {
 }
 
 type ActPage struct {
-	ID              int               `json:"id"`
-	URL             string            `json:"url"`
-	Title           string            `json:"title"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+	ID               int               `json:"id"`
+	URL              string            `json:"url"`
+	Title            string            `json:"title"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
 	LanguageVersions map[string]string `json:"language_versions,omitempty"`
-	DownloadURL     string            `json:"download_url"`
-	Body            string            `json:"body"`
-	BodyOffset      int               `json:"body_offset"`
-	BodyChunkSize   int               `json:"body_chunk_size"`
-	BodyTotalChars  int               `json:"body_total_chars"`
-	BodyHasMore     bool              `json:"body_has_more"`
+	DownloadURL      string            `json:"download_url"`
+	Body             string            `json:"body"`
+	BodyOffset       int               `json:"body_offset,omitempty"`
+	BodyChunkSize    int               `json:"body_chunk_size,omitempty"`
+	BodyTotalChars   int               `json:"body_total_chars"`
+	BodyHasMore      bool              `json:"body_has_more,omitempty"`
+	MatchCount       int               `json:"match_count,omitempty"`
 }
 
 var langHrefRe = regexp.MustCompile(`/(hy|en|ru)/acts/(\d+)`)
 
-func parseActPage(html string, actID int, lang string, bodyOffset, bodyChunkSize int) ActPage {
+func parseActPage(html string, actID int, lang string, bodyOffset, bodyChunkSize int, search string) ActPage {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return ActPage{}
@@ -172,9 +173,31 @@ func parseActPage(html string, actID int, lang string, bodyOffset, bodyChunkSize
 			paragraphs = append(paragraphs, text)
 		}
 	})
-	fullBody := strings.Join(paragraphs, "\n\n")
 
-	// Paginate
+	// Keyword filter: return only matching paragraphs (±1 context paragraph each)
+	if search != "" {
+		q := strings.ToLower(search)
+		var matched []string
+		included := make(map[int]bool)
+		for i, p := range paragraphs {
+			if strings.Contains(strings.ToLower(p), q) {
+				for _, j := range []int{i - 1, i, i + 1} {
+					if j >= 0 && j < len(paragraphs) && !included[j] {
+						included[j] = true
+						matched = append(matched, paragraphs[j])
+					}
+				}
+			}
+		}
+		fullBody := strings.Join(paragraphs, "\n\n")
+		act.BodyTotalChars = len([]rune(fullBody))
+		act.MatchCount = len(matched)
+		act.Body = strings.Join(matched, "\n\n---\n\n")
+		return act
+	}
+
+	// Default: character-based pagination
+	fullBody := strings.Join(paragraphs, "\n\n")
 	act.BodyTotalChars = len([]rune(fullBody))
 	runes := []rune(fullBody)
 	end := bodyOffset + bodyChunkSize
@@ -300,6 +323,8 @@ func handleGetAct(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResu
 		bodyChunkSize = maxBodyChars
 	}
 
+	search := req.GetString("search", "")
+
 	path := fmt.Sprintf("/%s/acts/%d/latest", lang, actID)
 	body, err := ajaxGet(path)
 	if err != nil {
@@ -309,7 +334,7 @@ func handleGetAct(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResu
 		return mcp.NewToolResultError("Request failed: " + err.Error()), nil
 	}
 
-	act := parseActPage(string(body), actID, lang, bodyOffset, bodyChunkSize)
+	act := parseActPage(string(body), actID, lang, bodyOffset, bodyChunkSize, search)
 	out, _ := json.MarshalIndent(act, "", "  ")
 	return mcp.NewToolResultText(string(out)), nil
 }
@@ -376,11 +401,12 @@ func main() {
 	), handleSearchActs)
 
 	s.AddTool(mcp.NewTool("get_act",
-		mcp.WithDescription("Fetch the text and metadata of a specific Armenian legal act by its numeric ARLIS ID. Large documents are paginated — check body_has_more and advance body_offset by body_chunk_size to read more."),
+		mcp.WithDescription("Fetch the text and metadata of a specific Armenian legal act by its numeric ARLIS ID. Use 'search' to filter the body to only paragraphs matching a keyword — this avoids paginating through large documents like codes. Without 'search', large documents are paginated — check body_has_more and advance body_offset by body_chunk_size to read more."),
 		mcp.WithNumber("act_id", mcp.Description("Numeric ARLIS act ID (e.g. 205622 for the Civil Code)."), mcp.Required()),
 		mcp.WithString("lang", mcp.Description("Language version to retrieve."), mcp.DefaultString("en"), mcp.Enum("en", "hy", "ru")),
-		mcp.WithNumber("body_offset", mcp.Description("Character offset to start reading from (0-based)."), mcp.DefaultNumber(0)),
-		mcp.WithNumber("body_chunk_size", mcp.Description("Max characters to return. Hard-capped at 40000."), mcp.DefaultNumber(20000)),
+		mcp.WithString("search", mcp.Description("Keyword to filter body paragraphs. Returns only matching paragraphs with one paragraph of context on each side. Use this instead of pagination for targeted lookups in large documents.")),
+		mcp.WithNumber("body_offset", mcp.Description("Character offset to start reading from (0-based). Only used when 'search' is not set."), mcp.DefaultNumber(0)),
+		mcp.WithNumber("body_chunk_size", mcp.Description("Max characters to return. Hard-capped at 40000. Only used when 'search' is not set."), mcp.DefaultNumber(20000)),
 	), handleGetAct)
 
 	s.AddTool(mcp.NewTool("get_recent_acts",
